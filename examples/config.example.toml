@@ -1,0 +1,102 @@
+# Naga Code user configuration — copy to ~/.config/naga/config.toml and edit.
+# Project overrides go in <project>/.naga/config.toml (security-related keys there are ignored).
+
+[general]
+default_profile = "coding"
+
+# ---------------------------------------------------------------- providers
+# Every provider points at a LOCAL endpoint by default. Nothing is sent to a cloud service.
+[providers.ollama]
+kind = "ollama"
+base_url = "http://127.0.0.1:11434"
+enabled = true
+
+[providers.llamacpp]
+# llama.cpp:  llama-server -m model.gguf --jinja -c 32768 --port 8080
+kind = "llama_cpp"
+base_url = "http://127.0.0.1:8080"
+enabled = false
+
+[providers.vllm]
+# vLLM: vllm serve Qwen/Qwen2.5-Coder-14B-Instruct --enable-auto-tool-choice --tool-call-parser hermes --port 8001
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:8001/v1"
+enabled = false
+# api_key = "..."   # only if your local server requires one
+
+# ----------------------------------------------------------------- profiles
+# Roles, not capability claims. `naga doctor` validates context size, tool support and VRAM fit.
+# tool_mode: auto (native if the model reports tool support, else text protocol) | native | text
+[profiles.coding]
+provider = "ollama"
+model = "qwen3-coder:latest"
+num_ctx = 32768
+temperature = 0.2
+tool_mode = "auto"
+
+[profiles.fast]
+provider = "ollama"
+model = "qwen3-coder:latest"
+num_ctx = 16384
+temperature = 0.1
+
+[profiles.reasoning]
+provider = "ollama"
+model = "qwen3.6:27b"
+num_ctx = 32768
+temperature = 0.3
+# think = true          # forwarded to backends that support a thinking switch
+
+[profiles.vision]
+provider = "ollama"
+model = "qwen3.6:27b"
+num_ctx = 16384
+
+[profiles.subagent]
+# Using the same model as `coding` avoids swapping models in and out of VRAM during delegation.
+provider = "ollama"
+model = "qwen3-coder:latest"
+num_ctx = 32768
+
+# -------------------------------------------------------------------- agent
+[agent]
+max_iterations = 40
+max_wall_seconds = 1800
+max_repeat_failures = 2
+require_validation_nudge = true
+
+# -------------------------------------------------------------- permissions
+[permissions]
+mode = "default"          # default | accept-edits | read-only
+# Simple (single, no pipes/redirects) commands starting with these prefixes run without a prompt:
+allow_commands = ["git status", "git diff", "git log", "ls", "cat", "rg", "pytest", "uv run pytest"]
+deny_commands = ["docker", "kubectl delete"]
+extra_read_dirs = []      # directories outside the project the agent may READ (never write)
+
+[context]
+reserve_tokens = 4096
+compact_threshold = 0.75
+max_tool_output_chars = 12000
+keep_recent_tool_results = 8
+
+[terminal]
+default_timeout = 120
+max_timeout = 1800
+sandbox = "auto"          # auto | none | bwrap
+
+[web]
+enabled = false           # web_fetch / package_version tools (every request still needs approval)
+
+# -------------------------------------------------------------------- hooks
+# [[hooks]]
+# event = "after_file_modification"
+# command = "ruff format {path}"
+# match = "*.py"
+# timeout = 30
+
+# --------------------------------------------------------- custom subagents
+# [subagents.migration-checker]
+# description = "Reviews Alembic migrations"
+# instructions = "Load the migration-review skill and review the migrations named in the task."
+# permission = "read"      # read | write | execute
+# profile = "subagent"

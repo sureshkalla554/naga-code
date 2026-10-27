@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "filesystem-docs": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/docs"],
+      "permission": "read",
+      "enabled": false,
+      "auto_connect": false
+    },
+    "local-http": {
+      "url": "http://127.0.0.1:9000/mcp",
+      "headers": {"Authorization": "Bearer ${MY_MCP_TOKEN}"},
+      "permission": "execute",
+      "enabled": false
+    }
+  }
+}
