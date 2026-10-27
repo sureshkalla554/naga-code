@@ -1,0 +1,63 @@
+# Run Naga Code in a GitHub Actions job. Naga uses local models, so this needs a self-hosted runner that can reach
+# an Ollama server (e.g. your GPU machine): `runs-on: [self-hosted]`.
+#
+#   - uses: actions/checkout@v4
+#   - uses: sureshkalla554/naga-code/examples/github-action@main
+#     with:
+#       prompt: "Review the diff of this pull request for bugs. Do not modify files."
+#       model: qwen3-coder:latest
+name: Naga Code
+description: Run the Naga Code local coding agent on the checked-out repository.
+inputs:
+  prompt:
+    description: What Naga should do.
+    required: true
+  model:
+    description: Ollama model to use.
+    default: qwen3-coder:latest
+  mode:
+    description: ask (read-only), plan, or agent.
+    default: ask
+  allow-edits:
+    description: Let Naga edit files without asking ("true"/"false").
+    default: "false"
+  allow-commands:
+    description: Space-separated command prefixes Naga may run without asking, e.g. "python3 pytest".
+    default: ""
+  ollama-url:
+    description: Ollama base URL.
+    default: http://127.0.0.1:11434
+outputs:
+  result:
+    description: Naga's final answer.
+    value: ${{ steps.naga.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - name: Install Naga Code
+      shell: bash
+      run: |
+        command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+        export PATH="$HOME/.local/bin:$PATH"
+        uv tool install --force "git+https://github.com/sureshkalla554/naga-code"
+    - name: Run Naga
+      id: naga
+      shell: bash
+      env:
+        NAGA_PROMPT: ${{ inputs.prompt }}
+        NAGA_MODEL: ${{ inputs.model }}
+        NAGA_MODE: ${{ inputs.mode }}
+        NAGA_ALLOW_EDITS: ${{ inputs.allow-edits }}
+        NAGA_ALLOW_COMMANDS: ${{ inputs.allow-commands }}
+        NAGA_HOME: ${{ runner.temp }}/naga
+      run: |
+        export PATH="$HOME/.local/bin:$PATH"
+        mkdir -p "$NAGA_HOME/config"
+        printf '[providers.ollama]\nbase_url = "%s"\n' "${{ inputs.ollama-url }}" > "$NAGA_HOME/config/config.toml"
+        args=(--model "$NAGA_MODEL" --mode "$NAGA_MODE" -p "$NAGA_PROMPT" --json)
+        [ "$NAGA_ALLOW_EDITS" = "true" ] && args+=(--allow-edits)
+        for c in $NAGA_ALLOW_COMMANDS; do args+=(--allow-commands "$c"); done
+        naga "${args[@]}" > "$RUNNER_TEMP/naga.json"
+        python3 -c "import json,sys; r=json.load(open(sys.argv[1])); print(r['text'])" "$RUNNER_TEMP/naga.json" > "$RUNNER_TEMP/naga.txt"
+        cat "$RUNNER_TEMP/naga.txt"
+        { echo "result<<NAGA_EOF"; cat "$RUNNER_TEMP/naga.txt"; echo "NAGA_EOF"; } >> "$GITHUB_OUTPUT"

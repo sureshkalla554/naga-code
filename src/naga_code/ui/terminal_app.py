@@ -87,6 +87,7 @@ class TerminalApp:
         self._running: asyncio.Future | None = None
         self.app = NagaApp(cwd, overrides=overrides, profile=profile, approval_handler=self.prompter,
                            on_event=self.renderer.handle, notify=self._notify, model=model)
+        self.prompter.ide = lambda: (self.app.ide, self.app.project_root)
         self.compact = compact
         self.resume_id = resume
         self.initial_mode = mode
@@ -333,6 +334,16 @@ class TerminalApp:
         def _(event):
             event.current_buffer.insert_text("\n")
 
+        @kb.add("escape", "escape")
+        def _(event):
+            """Esc Esc on an empty prompt: go back to an earlier message (/rewind)."""
+            buf = event.current_buffer
+            if not buf.text.strip():
+                buf.text = "/rewind"
+                buf.validate_and_handle()
+            else:
+                buf.reset()
+
         @kb.add("s-tab")
         def _(event):
             nxt = MODES[(MODES.index(self.app.mode) + 1) % len(MODES)]
@@ -395,7 +406,13 @@ class TerminalApp:
                 if text.startswith("!"):
                     await self.shell(text[1:])
                     continue
+                from ..commands_extra import correction_hint
+                earlier = [m.content for m in (self.app.agent.history if self.app.agent else [])
+                           if m.role == "user" and not m.meta.get("synthetic")]
+                hint = correction_hint(earlier, text)
                 result = await self.run_agent(text)
+                if hint:
+                    self.info(hint)
                 if self.app.goal:
                     from ..commands_extra import after_turn
                     await after_turn(self, self.app, result)

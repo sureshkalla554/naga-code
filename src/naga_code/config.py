@@ -61,6 +61,7 @@ DEFAULTS: dict[str, Any] = {
         "max_wall_seconds": 1800,
         "max_repeat_failures": 2,
         "require_validation_nudge": True,
+        "requirements_check": True,   # re-check the request's requirements before finishing a turn that edited files
     },
     "permissions": {
         # default: reads auto-approved, writes + commands prompt.

@@ -40,11 +40,23 @@ async def test_compaction_falls_back_when_model_fails():
 
 def test_prepare_elides_old_tool_outputs_without_mutating_history():
     cm = ContextManager(ContextBudget(32000), keep_recent_tool_results=2)
-    hist = long_history(5)
+    hist = long_history(12)   # 10 old outputs -> one batch of 8 elided
     out = cm.prepare(hist)
     tools = [m for m in out if m.role == "tool"]
     assert "elided" in tools[0].content and "elided" not in tools[-1].content
+    assert sum("elided" in t.content for t in tools) == 8
     assert all("elided" not in m.content for m in hist)
+
+
+def test_prepare_keeps_earlier_messages_identical_between_calls():
+    """Adding one tool result must not change any earlier message (backend prompt-prefix cache)."""
+    cm = ContextManager(ContextBudget(32000), keep_recent_tool_results=2)
+    changed = 0
+    for n in range(3, 20):
+        before, after = cm.prepare(long_history(n)), cm.prepare(long_history(n + 1))
+        if [m.content for m in after[:len(before)]] != [m.content for m in before]:
+            changed += 1
+    assert changed <= 2   # only when a whole batch is elided (n+1 = 10 and 18)
 
 
 def test_estimation_and_calibration():

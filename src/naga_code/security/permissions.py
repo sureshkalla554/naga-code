@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Awaitable, Callable
 
-from .commands import SHELL_SPLIT, SUBST, Risk, matches_prefix
+from .commands import SHELL_SPLIT, SUBST, Risk, auto_approvable
 
 Level = Risk  # permission levels share the risk scale
 
@@ -147,13 +147,13 @@ class PermissionEngine:
                 and not req.outside_project:
             return Authorization(True, "auto", "accept-edits mode")
         if req.tool == "run_command" and not req.outside_project and not req.network \
-                and is_simple_command(req.operation) and matches_prefix(req.operation, self.allow_commands):
+                and auto_approvable(req.operation, self.allow_commands, req.cwd or None):
             return Authorization(True, "auto", "allow-listed command")
         if req.grant_key and not req.outside_project:
             for g in self.grants:
                 if g.tool == req.tool and (g.key == req.grant_key or
-                                           (req.tool == "run_command" and is_simple_command(req.operation)
-                                            and matches_prefix(req.operation, [g.key]))):
+                                           (req.tool == "run_command"
+                                            and auto_approvable(req.operation, [g.key], req.cwd or None))):
                     return Authorization(True, "session-grant", g.describe())
         return None
 

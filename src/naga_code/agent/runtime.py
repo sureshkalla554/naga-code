@@ -15,9 +15,10 @@ from ..providers.tool_protocol import describe_tools, parse_tool_calls
 from ..tools.context import ToolContext
 from ..tools.registry import TaskCancelled, ToolRegistry, ToolResult
 from .context import ContextManager
-from .prompts import VALIDATION_NUDGE
+from .prompts import REQUIREMENTS_CHECK, REQUIREMENTS_RUN, VALIDATION_NUDGE
 
 VALIDATION_TOOLS = {"run_tests", "run_lint"}
+EDITING_TOOLS = {"write_file", "edit_file", "apply_patch"}
 REPEAT_NUDGE = ("[naga runtime] You already gave your final summary. If the task is complete, reply with the final "
                 "answer only and NO tool calls. Only call a tool if something essential is still unverified.")
 DENIAL_NUDGE = ("[naga runtime] {n} actions were denied by the permission system in this turn. Do not keep trying "
@@ -43,6 +44,7 @@ class AgentLimits:
     max_wall_seconds: float = 1800
     max_repeat_failures: int = 2
     validation_nudge: bool = True
+    requirements_check: bool = True   # before finishing a turn that changed files, check each stated requirement
 
 
 @dataclass
@@ -74,7 +76,8 @@ class Agent:
     def __init__(self, provider: Provider, model: str, registry: ToolRegistry, ctx: ToolContext,
                  context: ContextManager, system_prompt: Callable[[], str], *, tool_mode: str = "native",
                  options: GenerationOptions | None = None, limits: AgentLimits | None = None,
-                 on_event: EventSink | None = None, name: str = "main"):
+                 on_event: EventSink | None = None, name: str = "main",
+                 runtime_context: Callable[[], str] | None = None):
         self.provider = provider
         self.model = model
         self.registry = registry
@@ -86,8 +89,10 @@ class Agent:
         self.limits = limits or AgentLimits()
         self.on_event = on_event or (lambda e: None)
         self.name = name
+        self.runtime_context = runtime_context
         self.history: list[Message] = []
         self.total_usage = Usage(0, 0, 0.0)
+        self.call_log: list[dict[str, Any]] = []   # per model call: tokens and prompt-processing time
         self.last_estimate = 0
 
     def emit(self, kind: str, **kw: Any) -> None:
@@ -101,6 +106,9 @@ class Agent:
         if text_tools and tools:
             system += "\n\n" + describe_tools(tools)
         msgs = [Message("system", system)] + self.context.prepare(self.history, text_tools)
+        note = self.runtime_context() if self.runtime_context else ""
+        if note:  # last, so everything before it stays a cacheable prefix
+            msgs.append(Message("user", "[naga runtime note, not a new request]\n" + note, meta={"synthetic": True}))
         return msgs, (tools if tools and not text_tools else None)
 
     async def _call_model(self, msgs: list[Message], tools: list[dict] | None) -> tuple[str, list[ToolCall], Usage | None]:
@@ -118,6 +126,8 @@ class Agent:
             elif ev.type == "done":
                 usage = ev.usage
         if usage:
+            self.call_log.append({"prompt_tokens": usage.prompt_tokens, "prompt_eval_s": usage.prompt_eval_s,
+                                  "completion_tokens": usage.completion_tokens, "seconds": usage.duration_s})
             self.context.calibrate(sum(len(m.content) for m in msgs) + (len(json.dumps(tools)) if tools else 0),
                                    usage.prompt_tokens)
             self.total_usage.prompt_tokens = (self.total_usage.prompt_tokens or 0) + (usage.prompt_tokens or 0)
@@ -144,7 +154,7 @@ class Agent:
             await self.ctx.hooks.run("before_planning", {"prompt": user_input[:2000]})
         t0 = time.monotonic()
         failures: Counter[str] = Counter()
-        validated = nudged = denial_nudged = False
+        validated = nudged = denial_nudged = checked = False
         summaries: list[str] = []
         repeats = denials = provider_retries = 0
         n_calls = 0
@@ -208,21 +218,49 @@ class Agent:
                                                     meta={"synthetic": True}))
                         self.emit("info", text="no validation was run after edits; asking the model to validate")
                         continue
+                    if checked == "pending":   # the model answered the check without running anything
+                        checked = True
+                        self.history.append(Message("user", REQUIREMENTS_RUN, meta={"synthetic": True}))
+                        self.emit("info", text="requirements check: asking the model to actually run its checks")
+                        continue
+                    if (edited and not checked and self.limits.requirements_check
+                            and self.ctx.permissions.agent_mode == "agent" and it < self.limits.max_iterations):
+                        checked = "pending"   # becomes True once the model runs a tool after the check message
+                        self.history.append(Message("user", REQUIREMENTS_CHECK.format(request=user_input[:4000]),
+                                                    meta={"synthetic": True}))
+                        self.emit("info", text="checking the result against each requirement in the request")
+                        continue
                     final_text = text
                     stop = "completed"
                     break
+                if checked == "pending":
+                    checked = True
                 stop_now = False
-                for call in calls:
+                sigs = [c.name + json.dumps(c.arguments, sort_keys=True) for c in calls]
+                prefetched: dict[int, ToolResult] = {}
+                if len(calls) > 1 and all(self._read_only(c) and failures[g] < self.limits.max_repeat_failures
+                                          for c, g in zip(calls, sigs, strict=True)):
+                    # Several reads/searches in one turn: run them concurrently (writes always stay sequential).
+                    for call in calls:
+                        self.emit("tool_call", call=call)
+                    done = await asyncio.gather(*(self.registry.execute(c, self.ctx) for c in calls))
+                    prefetched = dict(enumerate(done))
+                for i, call in enumerate(calls):
                     n_calls += 1
-                    self.emit("tool_call", call=call)
-                    sig = call.name + json.dumps(call.arguments, sort_keys=True)
-                    if failures[sig] >= self.limits.max_repeat_failures:
+                    sig = sigs[i]
+                    if i in prefetched:
+                        res = prefetched[i]
+                        if not res.ok:
+                            failures[sig] += 1
+                    elif failures[sig] >= self.limits.max_repeat_failures:
+                        self.emit("tool_call", call=call)
                         res = ToolResult.error(f"this exact call already failed {failures[sig]} times; it was not run "
                                                "again. Change your approach, or stop and explain the blocker.")
                         failures[sig] += 1
                         if failures[sig] > self.limits.max_repeat_failures + 1:
                             stop_now = True
                     else:
+                        self.emit("tool_call", call=call)
                         res = await self.registry.execute(call, self.ctx)
                         if not res.ok:
                             failures[sig] += 1
@@ -231,6 +269,10 @@ class Agent:
                         validated = True
                     if res.output.startswith("Error: permission denied"):
                         denials += 1
+                    if res.ok and call.name in EDITING_TOOLS:
+                        res = self._with_code_check(res)
+                        if self.ctx.services.get("ide") is not None:
+                            res = await self._with_editor_errors(res, call)
                     self.history.append(Message("tool", res.output, tool_call_id=call.id, name=call.name,
                                                 meta={"ok": res.ok, "summary": res.summary}))
                     self.emit("tool_result", call=call, result=res)
@@ -263,6 +305,36 @@ class Agent:
         self.emit("final", text=final_text, data={"stop_reason": stop, "files": res.files_changed,
                                                    "validations": res.validations, "iterations": it})
         return res
+
+    def _with_code_check(self, res: ToolResult) -> ToolResult:
+        """Append syntax errors / undefined names in the files just edited (caught before any test runs)."""
+        from ..codeintel import check_after_edit
+        paths = list(dict.fromkeys(c.path for c in self.ctx.workspace.changes[-5:] if c.after is not None))
+        try:
+            report = check_after_edit(self.ctx.workspace.root, paths)
+        except Exception:  # noqa: BLE001 - a best-effort check must never break the edit
+            return res
+        if report:
+            res.output += f"\n\nAutomatic check of the edited file(s) found problems:\n{report}"
+        return res
+
+    async def _with_editor_errors(self, res: ToolResult, call: ToolCall) -> ToolResult:
+        """Append the editor's errors/warnings for the files just edited (language servers see what tests miss)."""
+        from ..ide import errors_after_edit
+        paths = [p for p in dict.fromkeys(c.path for c in self.ctx.workspace.changes[-5:])]
+        try:
+            report = await errors_after_edit(self.ctx.services["ide"], self.ctx.workspace.root, paths,
+                                             float(self.ctx.config.get("ide.diagnostics_delay_s", 1.0)))
+        except Exception:  # noqa: BLE001 - the editor bridge is optional
+            return res
+        if report:
+            res.output += f"\n\nThe editor now reports for the edited file(s):\n{report}"
+        return res
+
+    def _read_only(self, call: ToolCall) -> bool:
+        from ..security.commands import Risk
+        tool = self.registry.get(call.name)
+        return tool is not None and tool.level == Risk.READ and not call.parse_error and not call.name.startswith("mcp__")
 
     def _close_dangling_calls(self, why: str) -> None:
         """Ensure every assistant tool call has a matching tool message (valid history after cancel)."""

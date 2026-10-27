@@ -239,3 +239,114 @@ def assess_command(command: str | list[str], workspace_root: Path | None = None,
 def matches_prefix(command: str, prefixes: list[str]) -> bool:
     cmd = command.strip()
     return any(cmd == p or cmd.startswith(p + " ") for p in prefixes)
+
+
+# Harmless output redirections: merging stderr into stdout, or discarding output.
+_SAFE_REDIRECT = re.compile(r"(?<![\w>&])(?:[12]?>\s*/dev/null|2>&1|1>&2|>&2)(?![\w/])")
+_ALIASES = {"python": "python3"}
+
+
+def shell_segments(command: str) -> list[str] | None:
+    """Split a shell command at unquoted ``&&``, ``||``, ``;``, ``|`` and newlines.
+
+    Quotes are respected, so ``python3 -c "a; b"`` is one segment. Returns None for anything that is not a plain
+    list of commands: command/process substitution (also inside double quotes), heredocs, input redirection,
+    redirection to a file, background ``&``, or unbalanced quotes. Harmless redirects (2>&1, >/dev/null) are kept.
+    """
+    segments, cur, skel = [], [], []
+    quote = None
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote == "'":
+            cur.append(ch)
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            cur.append(command[i:i + 2])
+            i += 2
+            continue
+        if quote == '"':
+            if ch == "`" or command.startswith("$(", i):
+                return None
+            cur.append(ch)
+            if ch == '"':
+                quote = None
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            cur.append(ch)
+            i += 1
+            continue
+        if ch == "`" or command.startswith(("$(", "<(", ">("), i):
+            return None
+        two = command[i:i + 2]
+        if two in ("&&", "||"):
+            segments.append(("".join(cur), "".join(skel)))
+            cur, skel = [], []
+            i += 2
+            continue
+        if ch in ";|\n":
+            segments.append(("".join(cur), "".join(skel)))
+            cur, skel = [], []
+            i += 1
+            continue
+        cur.append(ch)
+        skel.append(ch)
+        i += 1
+    if quote:
+        return None
+    segments.append(("".join(cur), "".join(skel)))
+    out = []
+    for text, sk in segments:
+        sk = _SAFE_REDIRECT.sub(" ", sk)
+        if re.search(r"(?<![0-9])&(?!&)", sk) or "<" in sk or ">" in sk:
+            return None   # background job, input redirection, heredoc, or writing to a file
+        if text.strip():
+            out.append(text.strip())
+    return out
+
+
+def _alias(segment: str) -> str:
+    head, _, rest = segment.partition(" ")
+    return (_ALIASES.get(head, head) + (" " + rest if rest else "")).strip()
+
+
+def auto_approvable(command: str, prefixes: list[str], project_root: str | Path | None) -> bool:
+    """True when every part of a (possibly compound) command is allowed without asking.
+
+    A part is fine if it matches an allowed prefix (``python``/``python3`` count as the same program), is a ``cd``
+    into a directory inside the project, or is classified read-only. Harmless redirects are ignored.
+    """
+    segs = shell_segments(command)
+    if not segs:
+        return False
+    root = Path(project_root).resolve() if project_root else None
+    cwd = root
+    allowed = list(prefixes) + [_alias(p) for p in prefixes]
+    for seg in segs:
+        plain = _SAFE_REDIRECT.sub("", seg).strip()
+        try:
+            argv = shlex.split(plain)
+        except ValueError:
+            return False
+        if not argv:
+            continue
+        if argv[0] == "cd":
+            if len(argv) != 2 or root is None or cwd is None:
+                return False
+            target = (cwd / os.path.expanduser(argv[1])).resolve()
+            if target != root and root not in target.parents:
+                return False
+            cwd = target
+            continue
+        if matches_prefix(plain, allowed) or matches_prefix(_alias(plain), allowed):
+            continue
+        a = assess_command(plain, root)
+        if a.risk == Risk.READ and not a.network and not a.outside_project:
+            continue
+        return False
+    return True

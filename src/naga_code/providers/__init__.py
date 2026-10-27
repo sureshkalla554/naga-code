@@ -40,6 +40,8 @@ def build_provider(name: str, spec: dict[str, Any]) -> Provider:
                                 f"export {spec['api_key_env']}=... before starting naga")
     if api_key:
         kwargs["api_key"] = api_key
+    if cls is OllamaProvider and "keep_alive" in spec:
+        kwargs["keep_alive"] = spec["keep_alive"] or None
     if cls is SimpleHTTPProvider:
         kwargs.update(path=spec.get("path", "/generate"), input_field=spec.get("input_field", "prompt"),
                       model=spec.get("model", name), context_length=spec.get("context_length"))

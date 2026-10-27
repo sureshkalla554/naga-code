@@ -34,9 +34,19 @@ terminal and drew its output, colours included, into each image.
 - **You stay in control:** every edit and command asks first, through an arrow-key menu. You can allow
   something for the session, deny it with a reason, or edit the command. Dangerous commands always ask, and
   catastrophic ones are blocked.
-- **Undo anything:** `/undo` reverts the last edit, and `/rewind` rolls code and conversation back to any
-  earlier message.
-- **About 100 slash commands:** planning, reviews, background jobs, loops, goals, side questions, model
+- **Undo anything:** `/undo` reverts the last edit, and `/rewind` (or Esc Esc) rolls code and conversation back
+  to any earlier message, even after Naga restarts.
+- **Checks its own work:** after an edit Naga gets syntax errors and undefined names straight away (tree-sitter
+  for 12 languages, `ruff` for Python), plus your editor's errors when VS Code is connected. Before finishing a
+  turn that changed files, it runs a check of every requirement in your request.
+- **VS Code extension:** open Naga in the editor, send selections, see proposed edits as side-by-side diffs, and
+  get **Copilot-style suggestions as you type** from a local model. See [VS Code](#vs-code).
+- **Background jobs in their own git worktree:** `/background` and `/fork` work on a separate copy and branch;
+  you review and `/job-apply` the result. Jobs can ask for approval on your phone (`/notify`).
+- **Images and the web:** `@screenshot.png` or `/paste-image` for vision models, and an opt-in `web_search`
+  (self-hosted SearXNG or DuckDuckGo).
+- **GitHub workflow:** `/issue 42` reads an issue and implements it on a branch; `/pr` opens the pull request.
+- **Over 100 slash commands:** planning, reviews, background jobs, loops, goals, side questions, model
   switching, plugins and more. See [COMMANDS.md](COMMANDS.md).
 - **Ways to extend it:** skills, subagents, plugins, MCP servers, lifecycle hooks and project commands.
 - **Private by design:** no telemetry. The audit log, sessions and memory stay on your machine, with secrets
@@ -56,6 +66,9 @@ naga doctor                        # checks GPU, Ollama, models and sandbox
 
 The install is *editable*: changes to the source apply the next time you start `naga`, so don't move or delete
 the cloned folder. For development, `uv sync` creates `.venv`, and `uv run naga` runs from source.
+
+**VS Code extension** (optional): `python3 editors/vscode/build_vsix.py` then
+`code --install-extension editors/vscode/dist/naga-0.1.0.vsix`.
 
 Uninstall: `scripts/uninstall.sh` keeps your settings and sessions. `scripts/uninstall.sh --purge` also deletes
 them, after asking.
@@ -80,10 +93,14 @@ Inside a session, type what you want in plain language, or use a command:
 /code-review --fix            review the current diff and apply the fixes
 /btw what does utils.py do?   side question that isn't added to the conversation
 /rewind                       go back to an earlier point (code and/or conversation)
+look at @src/app.py:40-80     @file or @file:lines attaches those lines to your message
+what's wrong in @shot.png?    @image attaches a screenshot (vision models)
+/background finish the tests  continue as a job in its own worktree; /job-apply when it's done
+/issue 42                     read GitHub issue #42, branch, implement, test; then /pr
 ```
 
 **Keys:** Enter sends · Alt+Enter or Ctrl+J adds a new line · Shift+Tab cycles mode (ask → plan → agent) ·
-Ctrl+C cancels the running task · Ctrl+D exits · `!command` runs a shell command yourself.
+Esc Esc rewinds · Ctrl+C cancels the running task · Ctrl+D exits · `!command` runs a shell command yourself.
 
 **Modes:**
 - **ask:** answers and investigates using read-only tools.
@@ -111,10 +128,22 @@ the tests independently.
 | model | role | result | notes |
 |---|---|---|---|
 | `qwen3-coder:latest` (30B MoE) | coding / subagent | **15/15** (5 runs × 3 tasks) | fast and reliable with tools; ~20–55 s per task |
-| `qwen3.6:27b` | reasoning / vision | 3/3 | thinking + vision; slower |
-| `qwen3.6:latest` (36B MoE) | coding (current default here) | 1 smoke test passed | ~21.7 GB VRAM; not benchmarked |
+| `qwen3.6:27b` | reasoning / vision | 3/3 | thinking + vision (reads screenshots correctly); slower |
+| `qwen3.6:latest` (36B MoE) | coding | **985/1000** on the [10-task suite](#testing) | 23.9 GB: 8–13% may run on the CPU on a 24 GB card; image input crashes in Ollama 0.30.8 |
 | `gemma4:e2b` | fast | 2/3 | quick, but gave up on one task |
 | `codellama:7b` | — | 0/3 | no tool support |
+
+On the 10-task suite in `bench/` (bug fixes, a spec implementation, refactoring, test writing, a CLI, CSV→JSON,
+docs, performance, SQL injection), scored by hidden checkers: **Naga + qwen3.6:latest 985/1000 in 481 s**,
+Claude Code with Claude Opus 5.5 1000/1000 in 270 s (same prompts and permissions, one run each).
+Naga's two misses (an edge case, a script it didn't run) are what the requirements check and the smarter
+permissions now target. Small single-file tasks; not a measure of large-project work.
+
+**Speed.** Naga keeps the start of every prompt identical between calls, so Ollama reuses its processed prefix
+(re-reading 14k tokens costs ~6 s on qwen3.6; reusing them ~0.35 s), keeps the model loaded for 30 minutes
+(`keep_alive`), and runs read-only tool calls in parallel. `/doctor` warns when part of a model runs on the CPU
+(measured ~60 vs ~89 tokens/s for qwen3.6 at 13% vs 8% offload); a model that fits fully, such as
+`qwen3-coder`, is noticeably faster.
 
 ## Custom models (your own model server)
 
@@ -171,6 +200,23 @@ def generate(req: Req):
     return {"response": my_model(req.prompt)}   # your generation code
 ```
 
+## VS Code
+
+The extension in `editors/vscode` (install it as shown under [Install](#install)) adds:
+
+- **Ctrl+Alt+N** or the **Naga** status-bar button: Naga in VS Code's terminal for this workspace.
+- **Ctrl+Alt+L**: send the selection to Naga as `@file:lines`.
+- **Editor errors for the agent:** Naga reads VS Code's diagnostics (Pylance, ESLint, ...) through the
+  `ide_diagnostics` tool and is told about new problems right after each edit.
+- **Diffs:** edits waiting for your approval open in VS Code's side-by-side diff view.
+- **Inline suggestions as you type** from a local fill-in-the-middle model via Ollama (default
+  `qwen3-coder:latest`, ~250 ms per suggestion on an RTX 3090). A small model such as `qwen2.5-coder:1.5b` can
+  stay loaded next to Naga's main model; set `naga.completions.model`. Toggle with *Naga: Toggle Inline
+  Suggestions*.
+
+The bridge listens on 127.0.0.1 only and every request needs a random per-window token (stored with
+permissions 0600 under `~/.config/naga/ide/`). `/ide` shows the connection.
+
 ## Commands
 
 The full list with usage, descriptions and aliases is in **[COMMANDS.md](COMMANDS.md)**. Some highlights:
@@ -209,8 +255,12 @@ with a timeout → audit log**.
   Naga falls back to process-level isolation and says so in `/doctor`.
 - **Untrusted inputs:** repository files can't loosen permissions or run hooks or MCP servers until you trust
   them (`/hooks trust`, `/mcp trust NAME`).
+- **Smarter command approval:** commands are split at real shell separators (quotes respected). A compound
+  command such as `cd <project>/sub && python3 -m pytest -q 2>&1` runs without asking only if every part is
+  allowed or read-only; `python` counts as `python3`. Writing to files, `$(...)`, heredocs, background `&` and
+  anything outside the project still ask.
 - **Background jobs, schedules and `-p` runs** have no approver, so anything needing approval is denied unless
-  you pre-allow it (`--allow-edits`, `--allow-commands PREFIX`).
+  you pre-allow it (`--allow-edits`, `--allow-commands PREFIX`) or use phone approvals (`--phone-approvals`).
 
 ## Extending Naga
 
@@ -242,6 +292,20 @@ with a timeout → audit log**.
   shows a reverse patch instead. `/rewind` goes back several steps, and `/checkpoint` saves patches of
   everything the agent changed.
 
+## Background jobs and phone approvals
+
+`/background [task]` continues the session as a separate process and `/fork [task]` copies it; you keep working.
+In a git project each job gets its **own worktree and branch** (`naga/<job>`), starting from your current files
+including uncommitted changes, and may edit freely there. `/list-agents <job>` shows its output and changes,
+`/job-apply <job>` copies the changes into your project after showing them, `/job-discard <job>` deletes the
+worktree and branch. `--here` runs in the project folder instead.
+
+Unattended runs can't ask you at the keyboard, so actions that need approval are denied, unless you set up
+phone approvals: `/notify setup [ntfy server URL]` creates a secret [ntfy](https://ntfy.sh) topic; subscribe to
+it in the ntfy phone app, and jobs send **Approve / Deny** buttons and a "finished" message. Each request has a
+one-time code, no answer within 10 minutes means deny, and dangerous actions can't be approved remotely. With
+the public ntfy.sh the notification text passes through their server; self-host ntfy to avoid that.
+
 ## Configuration
 
 Settings layer as follows: `~/.config/naga/config.toml` (see `examples/config.example.toml`), then the
@@ -262,8 +326,14 @@ src/naga_code/
   commands.py            core slash commands and the command registry
   commands_extra.py      the rest of the slash commands (rewind, btw, background, custom-model, ...)
   custom_models.py       detects and saves your own model servers
-  background.py          background jobs (/background, /fork)
+  background.py          background jobs in git worktrees (/background, /fork, /job-apply)
   plugins.py             plugin discovery and install
+  codeintel.py           tree-sitter definitions, outlines and post-edit syntax checks
+  ide.py                 bridge to the VS Code extension (diagnostics, selection, diffs)
+  mentions.py            @file, @file:lines and @image mentions
+  change_store.py        saved change ledger, so /undo and /rewind survive restarts
+  remote_approval.py     phone approvals and notifications (ntfy)
+  api.py                 Python API (run / arun) and the JSON event format
   agent/                 agent loop, context management, prompts, planner, repo map
   providers/             ollama, openai_compatible, llama_cpp, simple_http, text tool protocol
   tools/                 filesystem, patching, terminal, search, git, testing, web
@@ -271,6 +341,9 @@ src/naga_code/
   skills/ subagents/ mcp/ memory/
   ui/                    terminal app, arrow-key menus, approval prompt, renderer, tiger logo, themes
 tests/                   unit, security and integration tests
+bench/                   10-task quality suite with hidden checkers (regression.py)
+editors/vscode/          VS Code extension (plain JavaScript; build_vsix.py packages it)
+examples/github-action/  run Naga in GitHub Actions on a self-hosted runner
 scripts/                 install.sh, uninstall.sh, benchmark.sh, gen_commands.py
 COMMANDS.md              every slash command (generated: uv run python scripts/gen_commands.py > COMMANDS.md)
 ```
@@ -278,11 +351,17 @@ COMMANDS.md              every slash command (generated: uv run python scripts/g
 ## Testing
 
 ```bash
-uv run pytest -q                 # 166 tests with a fake model and local test servers; no GPU or network
+uv run pytest -q                 # 195 tests with a fake model and local test servers; no GPU or network
 uv run pytest -m integration     # 2 tests against your real Ollama model
 uv run ruff check src tests
 scripts/benchmark.sh --runs 3    # end-to-end coding tasks, results re-checked independently
+uv run python bench/regression.py --save-baseline   # 10-task quality suite with hidden checkers; later runs
+uv run python bench/regression.py                   # report any task whose score drops (exit status 1)
 ```
+
+Automation: `naga -p "..." --stream-json` prints one JSON event per line; from Python,
+`from naga_code.api import run` returns the result as a dict; `examples/github-action/action.yml` runs Naga in CI
+on a self-hosted runner with Ollama.
 
 ## Troubleshooting
 
@@ -302,11 +381,15 @@ scripts/benchmark.sh --runs 3    # end-to-end coding tasks, results re-checked i
 
 - There's no in-process Hugging Face `transformers` backend. Serve the model behind a port and use
   `/custom-model`.
-- Code search is ripgrep plus pattern matching, with no tree-sitter or language server.
-- Subagents that write files share one working tree (one at a time), not separate git worktrees.
-- `/rewind` restores files only for changes made since Naga started.
+- Code intelligence covers 12 languages with tree-sitter; there's no standalone language server (VS Code's
+  diagnostics are used when the extension is connected).
+- `/batch` units and writing subagents share one working tree (one at a time); only background jobs get
+  separate worktrees.
+- The editor integration is VS Code only, and there's no full-screen terminal interface yet.
+- Phone approvals were tested against a local ntfy-compatible server, not yet with the real ntfy app.
+- SearXNG search is supported but must be installed separately; DuckDuckGo needs nothing but sends your query
+  there.
 - Commands that need a cloud account (login, remote control, teleport, …) aren't available.
-- Image input isn't exposed in the terminal UI yet, and web search isn't included.
 - Local models vary. Check the turn summary, which reports what actually happened.
 
 ## License

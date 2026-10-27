@@ -29,6 +29,7 @@ class ApprovalPrompter:
         self.session: PromptSession = PromptSession()
         self.before = before  # e.g. stop live rendering
         self.after = after    # e.g. restore the Ctrl+C task-cancel handler (prompt-toolkit removes it)
+        self.ide = None       # callable -> (IDEClient | None, project root): show proposed edits in the editor
 
     async def __call__(self, req: ApprovalRequest) -> ApprovalResponse:
         try:
@@ -36,6 +37,27 @@ class ApprovalPrompter:
         finally:
             if self.after:
                 self.after()
+
+    async def _show_in_editor(self, req: ApprovalRequest) -> None:
+        """Open the proposed edit in the editor's diff view (best effort, when an editor is connected)."""
+        if not (self.ide and req.preview and req.tool in ("write_file", "edit_file", "apply_patch")):
+            return
+        client, root = self.ide()
+        if client is None:
+            return
+        from ..ide import proposed_content
+        from ..tools.patching import parse_patch
+        try:
+            patches = parse_patch(req.preview)
+            rel = patches[0].new_path or patches[0].old_path if patches else None
+            if not rel:
+                return
+            target = (root / rel).resolve()
+            content = proposed_content(target, req.preview)
+            if content is not None:
+                await client.open_diff(str(target), content, f"Naga proposes: {rel}")
+        except Exception:  # noqa: BLE001 - the terminal prompt still shows the diff
+            pass
 
     async def _ask(self, req: ApprovalRequest) -> ApprovalResponse:
         if self.before:
@@ -57,6 +79,7 @@ class ApprovalPrompter:
             lines = req.preview.splitlines()
             parts.append(Syntax("\n".join(lines[:60]) + (f"\n… {len(lines) - 60} more lines" if len(lines) > 60 else ""),
                                 "diff", theme=ui_style.STATE["syntax"], word_wrap=True, background_color="default"))
+        await self._show_in_editor(req)
         style = LEVEL_STYLE.get(req.level, "white")
         self.console.print(Panel(Group(*parts), title=f"[{style}]approval needed · {req.level.name.lower()} · {req.tool}[/]",
                                  border_style=style))

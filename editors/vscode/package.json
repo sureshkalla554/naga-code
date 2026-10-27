@@ -1,0 +1,102 @@
+{
+  "name": "naga",
+  "displayName": "Naga Code",
+  "description": "Use the Naga Code local coding agent from VS Code: open it in the terminal, send selections, and share editor errors and diffs with it.",
+  "version": "0.1.0",
+  "publisher": "naga-code",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "naga.open",
+        "title": "Naga: Open Naga in Terminal"
+      },
+      {
+        "command": "naga.sendSelection",
+        "title": "Naga: Send Selection to Naga"
+      },
+      {
+        "command": "naga.status",
+        "title": "Naga: Show Connection Status"
+      },
+      {
+        "command": "naga.toggleCompletions",
+        "title": "Naga: Toggle Inline Suggestions"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "naga.open",
+        "key": "ctrl+alt+n"
+      },
+      {
+        "command": "naga.sendSelection",
+        "key": "ctrl+alt+l",
+        "when": "editorTextFocus"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "naga.sendSelection",
+          "when": "editorHasSelection",
+          "group": "naga"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Naga Code",
+      "properties": {
+        "naga.command": {
+          "type": "string",
+          "default": "naga",
+          "description": "Command used to start Naga."
+        },
+        "naga.extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra arguments, e.g. [\"--model\", \"qwen3-coder:latest\"]."
+        },
+        "naga.completions.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Inline code suggestions as you type (local model via Ollama)."
+        },
+        "naga.completions.model": {
+          "type": "string",
+          "default": "qwen3-coder:latest",
+          "description": "Ollama model for suggestions; must support fill-in-the-middle (Qwen-Coder, CodeLlama, DeepSeek-Coder, StarCoder families). A small one such as qwen2.5-coder:1.5b can stay loaded next to Naga's main model."
+        },
+        "naga.completions.endpoint": {
+          "type": "string",
+          "default": "http://127.0.0.1:11434",
+          "description": "Ollama address."
+        },
+        "naga.completions.debounceMs": {
+          "type": "number",
+          "default": 250,
+          "description": "Pause after typing before asking for a suggestion."
+        },
+        "naga.completions.maxTokens": {
+          "type": "number",
+          "default": 128,
+          "description": "Longest suggestion, in tokens."
+        }
+      }
+    }
+  }
+}

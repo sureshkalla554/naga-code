@@ -48,6 +48,31 @@ def _tree(ws: Workspace, root: Path, depth: int, max_entries: int) -> list[str]:
     return lines
 
 
+def _definitions(ws: Workspace, files: list[str], budget: int = 2500, max_files: int = 80) -> list[str]:
+    """One line per source file: its top-level functions/classes (skips tests; bounded)."""
+    from ..codeintel import MAX_FILE_BYTES, supported, symbols
+    src = [f for f in files if supported(f) and "test" not in Path(f).name.lower() and "/tests/" not in f"/{f}"]
+    src.sort(key=lambda f: (f.count("/"), f))
+    lines, used = [], 0
+    for rel in src[:max_files]:
+        p = ws.root / rel
+        try:
+            if p.stat().st_size > MAX_FILE_BYTES:
+                continue
+            names = [s.name for s in symbols(p, p.read_bytes()) if not s.container]
+        except OSError:
+            continue
+        if not names:
+            continue
+        line = f"  {rel}: " + ", ".join(names[:12]) + (f" (+{len(names) - 12})" if len(names) > 12 else "")
+        if used + len(line) > budget:
+            lines.append(f"  ... ({len(src) - len(lines)} more source files)")
+            break
+        lines.append(line)
+        used += len(line)
+    return lines
+
+
 def build_repo_map(ws: Workspace, max_chars: int = 6000) -> str:
     root = ws.root
     out = [f"Project root: {root}"]
@@ -74,6 +99,10 @@ def build_repo_map(ws: Workspace, max_chars: int = 6000) -> str:
         out.append(f"Detected test commands: {pp.test or '-'}; lint: {pp.lint or '-'}")
     out.append("Layout:")
     out += ["  " + ln for ln in _tree(ws, root, 2, 80)]
+    defs = _definitions(ws, files)
+    if defs:
+        out.append("Top-level definitions (parsed; use code_outline for a file's full outline):")
+        out += defs
     for name in DOCS[:3]:
         p = root / name
         if p.is_file():

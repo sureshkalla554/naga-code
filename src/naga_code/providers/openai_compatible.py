@@ -54,6 +54,10 @@ class OpenAICompatibleProvider(Provider):
         out = []
         for m in messages:
             d: dict[str, Any] = {"role": m.role, "content": m.content}
+            if m.meta.get("images"):   # OpenAI-style multimodal content
+                d["content"] = [{"type": "text", "text": m.content}] + [
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+                    for b64 in m.meta["images"]]
             calls = [c for c in m.tool_calls if c.parse_error is None]
             if calls:
                 d["tool_calls"] = [{"id": c.id, "type": "function",

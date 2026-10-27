@@ -16,8 +16,9 @@ class OllamaProvider(Provider):
     kind = "ollama"
 
     def __init__(self, name: str = "ollama", base_url: str = "http://127.0.0.1:11434", timeout: float = 600.0,
-                 api_key: str | None = None):
+                 api_key: str | None = None, keep_alive: str | None = "30m"):
         super().__init__(name, base_url, timeout)
+        self.keep_alive = keep_alive  # Ollama unloads after 5 min by default; reloading a 20+ GB model costs seconds
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}   # e.g. Ollama behind a proxy
         self._client = httpx.AsyncClient(base_url=self.base_url, timeout=httpx.Timeout(timeout, connect=5.0),
                                          headers=headers)
@@ -100,6 +101,8 @@ class OllamaProvider(Provider):
                                 "options": self._options(options)}
         if tools:
             body["tools"] = tools
+        if self.keep_alive:
+            body["keep_alive"] = self.keep_alive
         if options and options.think is not None:
             body["think"] = options.think
         t0 = time.monotonic()
@@ -141,7 +144,8 @@ class OllamaProvider(Provider):
                         yield StreamEvent(type="done", finish_reason=chunk.get("done_reason"), usage=Usage(
                             prompt_tokens=chunk.get("prompt_eval_count"),
                             completion_tokens=chunk.get("eval_count"),
-                            duration_s=time.monotonic() - t0))
+                            duration_s=time.monotonic() - t0,
+                            prompt_eval_s=(chunk.get("prompt_eval_duration") or 0) / 1e9 or None))
                         return
         except httpx.ConnectError as e:
             raise ProviderError(f"cannot connect to Ollama at {self.base_url}", "Start it with `ollama serve`.") from e

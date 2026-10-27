@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import asyncio
 import json
 import sys
@@ -34,6 +35,10 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-commands", action="append", default=[], metavar="PREFIX",
                    help="(-p) auto-approve simple commands with this prefix (repeatable)")
     p.add_argument("--json", action="store_true", help="(-p) print a JSON result record")
+    p.add_argument("--stream-json", action="store_true",
+                   help="(-p) print one JSON object per event (text, tool calls, results, final) as they happen")
+    p.add_argument("--phone-approvals", action="store_true",
+                   help="(-p) ask on your phone (ntfy, see /notify) instead of denying actions that need approval")
     sub = p.add_subparsers(dest="cmd")
     sub.add_parser("doctor", help="diagnose environment, providers and models")
     sub.add_parser("models", help="list installed models and configured profiles")
@@ -66,10 +71,20 @@ async def _headless(args: argparse.Namespace, cwd: Path) -> int:
 
     err = Console(stderr=True, highlight=False)
     renderer = EventRenderer(err, compact=True)
+    from .api import event_to_json
+    stream = (lambda e: print(json.dumps(event_to_json(e)), flush=True)) if args.stream_json else None
     app = NagaApp(cwd, overrides=_overrides(args), profile=args.profile, model=args.model,
-                  on_event=None if args.json else renderer.handle,
+                  on_event=stream or (None if args.json else renderer.handle),
                   notify=lambda k, m: err.print(f"[dim]{k}: {m}[/]"))
-    # No approval handler: anything that needs approval is denied and reported (never silently allowed).
+    # No approval handler: anything that needs approval is denied and reported (never silently allowed),
+    # unless --phone-approvals is given and notifications are configured (/notify setup).
+    from .remote_approval import Notifier, PhoneApprover
+    notifier = Notifier.from_config(app.config)
+    if args.phone_approvals:
+        if notifier is None:
+            err.print("[yellow]--phone-approvals ignored: notifications are not set up (run /notify setup)[/]")
+        else:
+            app.permissions.handler = PhoneApprover(notifier, label=f"Naga ({cwd.name})")
     await app.start()
     if not app.provider_status[0]:
         err.print(f"[red]provider unavailable: {app.provider_status[1]}[/]")
@@ -83,10 +98,23 @@ async def _headless(args: argparse.Namespace, cwd: Path) -> int:
         result = await app.run(args.prompt)
     finally:
         await app.shutdown()
-    if args.json:
+    if notifier is not None and os.environ.get("NAGA_JOB_ID"):
+        try:   # tell the phone a background job is done
+            await notifier.publish(f"Naga job {os.environ['NAGA_JOB_ID']} {result.stop_reason}",
+                                   (result.text or "")[:600] + (f"\nchanged: {', '.join(result.files_changed[:8])}"
+                                                               if result.files_changed else ""),
+                                   tags=["white_check_mark" if result.stop_reason == "completed" else "x"])
+        except Exception:  # noqa: BLE001 - a failed notification must not fail the job
+            pass
+        finally:
+            await notifier.aclose()
+    if args.stream_json:
+        pass   # the "final" event already carried the result
+    elif args.json:
         print(json.dumps({"text": result.text, "stop_reason": result.stop_reason, "iterations": result.iterations,
                           "tool_calls": result.tool_calls, "files_changed": result.files_changed,
-                          "validations": result.validations, "session": app.session.id}, indent=2))
+                          "validations": result.validations, "session": app.session.id,
+                          "model_calls": app.agent.call_log if app.agent else []}, indent=2))
     else:
         print(result.text)
     return 0 if result.stop_reason == "completed" else 1

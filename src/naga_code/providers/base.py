@@ -45,6 +45,7 @@ class Usage:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     duration_s: float | None = None
+    prompt_eval_s: float | None = None   # time the backend spent processing the prompt (low = prefix cache hit)
 
 
 @dataclass
@@ -107,6 +108,10 @@ def explain_backend_error(text: str) -> str | None:
         return "This model has no native tool support; set tool_mode = \"text\" in its profile."
     if "cuda" in t and ("driver" in t or "version" in t):
         return "CUDA driver/runtime mismatch. Check `nvidia-smi` and the backend's CUDA build."
+    if "unexpected eof" in t or "runner process has terminated" in t:
+        return ("The model runner crashed. Common causes: out of GPU memory (lower num_ctx or unload other models), "
+                "or this model's image support failing in your Ollama version (for images, try another vision model, "
+                "e.g. /model qwen3.6:27b).")
     if "unsupported" in t and "architecture" in t:
         return "The backend does not support this model architecture; try a different backend or model."
     return None

@@ -117,3 +117,57 @@ def test_build_provider_unknown_kind_and_transformers_message():
 def test_error_hints():
     assert "smaller model" in explain_backend_error("model requires more system memory (40 GiB)")
     assert explain_backend_error("all good") is None
+
+
+def test_gpu_fit_message():
+    from naga_code.diagnostics import gpu_fit_message
+    assert gpu_fit_message("m", 20_000_000_000, 20_000_000_000, 32768)[0] == "ok"
+    status, detail = gpu_fit_message("qwen3.6:latest", 24_000_000_000, 20_880_000_000, 32768)
+    assert status == "warn" and "13% runs on the CPU" in detail and "num_ctx" in detail
+
+
+async def test_web_search_parses_duckduckgo_and_searxng(make_app, monkeypatch):
+    import httpx
+    from naga_code.tools import web
+    ddg = ('<div class="result results_links results_links_deep web-result "><h2 class="result__title">'
+           '<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdocs.python.org%2F3%2F'
+           'whatsnew%2F3.13.html&amp;rut=x">What&#x27;s New In Python 3.13</a></h2>'
+           '<a class="result__snippet" href="x">Python 3.13 was released on <b>October 7, 2024</b>.</a></div>')
+
+    def handler(request):
+        if "duckduckgo" in request.url.host:
+            assert request.method == "POST" and b"q=python+3.13" in request.content
+            return httpx.Response(200, text=ddg)
+        assert request.url.path == "/search" and request.url.params["format"] == "json"
+        return httpx.Response(200, json={"results": [{"title": "T", "url": "https://x.org", "content": "c"}]})
+    real = httpx.AsyncClient
+    monkeypatch.setattr(web.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    app = await make_app(overrides={"web": {"enabled": True}})
+    app.permissions.mode = "default"
+    r = await web.web_search(app.ctx, {"query": "python 3.13"})
+    assert "https://docs.python.org/3/whatsnew/3.13.html" in r.output and "October 7, 2024" in r.output
+    app.config.data["web"]["searxng_url"] = "http://127.0.0.1:8888"
+    r = await web.web_search(app.ctx, {"query": "q"})
+    assert "1. T" in r.output and "via searxng" in r.summary
+    req = web._assess("search")(app.ctx, {"query": "q"})
+    assert req.network and req.grant_key == "search:searxng" and "127.0.0.1:8888" in req.impact
+    assert "web_search" in app.registry.names()
+
+
+async def test_python_api_and_stream_json(project, monkeypatch):
+    import json as _json
+    from naga_code import api
+    from naga_code.providers.fake import FakeProvider
+    import naga_code.app as appmod
+    real = appmod.NagaApp.__init__
+
+    def init(self, *a, **kw):   # use the scripted fake model instead of a real server
+        kw["provider"] = FakeProvider([{"text": "", "tool_calls": [("read_file", {"path": "calc.py"})]}, "It subtracts."])
+        real(self, *a, **kw)
+    monkeypatch.setattr(appmod.NagaApp, "__init__", init)
+    events = []
+    r = await api.arun("what does add do?", project, mode="ask", on_event=events.append)
+    assert r["text"] == "It subtracts." and r["stop_reason"] == "completed"
+    kinds = [e["type"] for e in events]
+    assert "tool_call" in kinds and "tool_result" in kinds and kinds[-1] == "final"
+    assert all(_json.dumps(e) for e in events)   # every event is JSON-serialisable

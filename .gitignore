@@ -9,3 +9,5 @@ build/
 NAGA.local.md
 .naga/memory/
 .claude/
+editors/vscode/dist/
+bench/last-run.json

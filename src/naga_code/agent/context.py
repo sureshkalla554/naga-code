@@ -18,6 +18,9 @@ Write a precise summary that a fresh agent can continue from. Keep, verbatim whe
 Do not invent anything that is not in the transcript. Use terse bullet points."""
 
 
+ELIDE_BATCH = 8
+
+
 @dataclass
 class ContextBudget:
     context_length: int
@@ -71,7 +74,10 @@ class ContextManager:
         The stored history is never modified, so /export and resume keep full detail.
         """
         tool_idx = [i for i, m in enumerate(history) if m.role == "tool"]
-        elide = set(tool_idx[:-self.keep_recent]) if self.keep_recent and len(tool_idx) > self.keep_recent else set()
+        # Elide in batches of ELIDE_BATCH: eliding one more output per call would change an earlier message every
+        # call and defeat the backend's prompt-prefix cache. Up to keep_recent + ELIDE_BATCH - 1 stay in full.
+        n_old = (max(0, len(tool_idx) - self.keep_recent) // ELIDE_BATCH) * ELIDE_BATCH if self.keep_recent else 0
+        elide = set(tool_idx[:n_old])
         out: list[Message] = []
         for i, m in enumerate(history):
             content = m.content

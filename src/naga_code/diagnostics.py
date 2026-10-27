@@ -48,6 +48,36 @@ def estimate_vram_gb(size_bytes: int | None, num_ctx: int) -> float | None:
     return size_bytes / 1e9 * 1.1 + num_ctx / 32768 * 2.0
 
 
+def gpu_fit_message(model: str, size: int, size_vram: int, num_ctx: int | None) -> tuple[str, str]:
+    """(status, detail) for a loaded model: how much of it is in VRAM (pure; tested)."""
+    if not size:
+        return "info", f"{model}: loaded (size unknown)"
+    on_cpu = 1 - size_vram / size
+    ctx = f", context {num_ctx:,}" if num_ctx else ""
+    if on_cpu < 0.01:
+        return "ok", f"{model}: fully on the GPU ({size / 1e9:.1f} GB{ctx})"
+    return "warn", (f"{model}: {on_cpu:.0%} runs on the CPU ({size / 1e9:.1f} GB{ctx}), so output is slower "
+                    "(measured ~60 vs ~89 tokens/s for qwen3.6 at 13% vs 8%). Free GPU memory, lower num_ctx in the "
+                    "profile, or use a smaller model such as qwen3-coder")
+
+
+async def gpu_fit_checks(provider) -> list[Check]:
+    """For Ollama: loaded models that don't fit in VRAM (part of the model then runs on the CPU)."""
+    running = getattr(provider, "running", None)
+    if running is None:
+        return []
+    try:
+        models = await running()
+    except Exception:  # noqa: BLE001 - informational only
+        return []
+    out = []
+    for m in models:
+        status, detail = gpu_fit_message(m.get("name", "?"), int(m.get("size") or 0), int(m.get("size_vram") or 0),
+                                         m.get("context_length"))
+        out.append(Check(status, "gpu fit", detail))
+    return out
+
+
 async def run_doctor(app: "NagaApp") -> list[Check]:
     checks = [Check("info", "naga", f"Naga Code {__version__}, Python {sys.version.split()[0]} ({sys.executable})")]
     for tool, why in (("git", "git integration"), ("rg", "fast code search (falls back to Python search)"),
@@ -83,6 +113,8 @@ async def run_doctor(app: "NagaApp") -> list[Check]:
         except ProviderError as e:
             ok, detail = False, str(e)
         checks.append(Check("ok" if ok else "fail", f"provider:{name}", detail))
+        if ok:
+            checks += await gpu_fit_checks(app.get_provider(name))
 
     installed: dict[str, dict] = {}
     for pname, prof in app.config.section("profiles").items():

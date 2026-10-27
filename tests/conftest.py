@@ -53,6 +53,9 @@ async def make_app(project):
 
     async def factory(script=None, approver=None, overrides=None, native_tools=True, root=None, **kw):
         events = []
+        # Scripted fake models list every reply; the end-of-turn requirements check would add an unscripted turn.
+        overrides = dict(overrides or {})
+        overrides["agent"] = {"requirements_check": False, **overrides.get("agent", {})}
         app = NagaApp(root or project, provider=FakeProvider(script or [], native_tools=native_tools),
                       approval_handler=approver if approver is not None else Approver(),
                       on_event=events.append, overrides=overrides, **kw)

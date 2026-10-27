@@ -95,6 +95,8 @@ class NagaApp:
         self.context_length = 8192
         self.tool_mode = "native"
         self.model_caps: list[str] = []
+        self.ide = None   # ide.IDEClient when an editor with the Naga extension is open on this project
+        self.pending_images: list[str] = []   # base64 images queued by /image or /paste-image for the next message
         self.prompt_extras: dict[str, str] = {}   # named system-prompt sections (/goal, /output-style, ...)
         self.goal: str | None = None
         self.advisor_model: str | None = None
@@ -174,31 +176,57 @@ class NagaApp:
                             int(cfg.get("keep_recent_tool_results", 8)), int(cfg.get("max_tool_output_chars", 12000)))
         acfg = self.config.section("agent")
         limits = AgentLimits(int(acfg.get("max_iterations", 40)), float(acfg.get("max_wall_seconds", 1800)),
-                             int(acfg.get("max_repeat_failures", 2)), bool(acfg.get("require_validation_nudge", True)))
+                             int(acfg.get("max_repeat_failures", 2)), bool(acfg.get("require_validation_nudge", True)),
+                             bool(acfg.get("requirements_check", True)))
         history = self.agent.history if self.agent else self.session.messages
         self.agent = Agent(provider, name, self.registry, self.ctx, cm, self.system_prompt, tool_mode=mode,
-                           options=opts, limits=limits, on_event=self._forward)
+                           options=opts, limits=limits, on_event=self._forward, runtime_context=self.runtime_context)
         self.agent.history = history
         self.session.model = name
         return name
 
     async def start(self) -> None:
-        self.repo_map = build_repo_map(self.workspace, max_chars=4000)
+        self.repo_map = build_repo_map(self.workspace, max_chars=6500)
         self.session.task.starting_git_status = G.status(self.project_root).short()
         await self.configure_model()
         await self.hooks.run("session_start", {"project": str(self.project_root)})
         for st in await self.mcp.auto_connect():
             self._notify("info" if st.status == "connected" else "warning",
                          f"MCP {st.config.name}: {st.status}{(' — ' + st.error) if st.error else ''}")
+        if self.config.get("ide.enabled", True):
+            await self.connect_ide()
+
+    async def connect_ide(self) -> bool:
+        """Connect to an editor running the Naga extension for this project (see ide.py)."""
+        from . import ide
+        if self.ide is not None:
+            await self.ide.aclose()
+        self.ide = await ide.connect(self.project_root)
+        self.ctx.services["ide"] = self.ide
+        if self.ide is not None:
+            ide.register_tools(self.registry, self.ide, self.project_root)
+            self._notify("info", f"connected to {self.ide.name} (editor diagnostics and diffs available)")
+        return self.ide is not None
 
     # ---- prompt ---------------------------------------------------------
     def system_prompt(self) -> str:
+        """Stable across turns, so the backend can reuse its cached prompt prefix (a changed byte near the
+        start makes a local model re-read everything: ~6 s per call for 14k tokens on qwen3.6)."""
         return build_system_prompt(PromptParts(
-            mode=self.permissions.agent_mode, cwd=str(self.cwd), git=G.status(self.project_root).short(),
+            mode=self.permissions.agent_mode, cwd=str(self.cwd), git="see the runtime note at the end",
             repo_map=self.repo_map, instructions=instr.render(self.instruction_files),
             skills_index=self.skills.index_prompt(), agents_index=self.subagents.index_prompt(),
-            memory=self.memory.prompt(), plan=self.session.task.plan.render(), notes=self.session.task.notes,
-            extra=list(self.prompt_extras.values())))
+            memory=self.memory.prompt(), extra=list(self.prompt_extras.values())))
+
+    def runtime_context(self) -> str:
+        """State that changes during a task (git status, plan, notes): sent as the last message of each call."""
+        parts = [f"git: {G.status(self.project_root).short()}"]
+        plan = self.session.task.plan.render()
+        if plan and plan != "(no plan)":
+            parts.append("current task plan (keep acceptance criteria satisfied):\n" + plan)
+        if self.session.task.notes:
+            parts.append("task notes:\n" + "\n".join(f"- {n}" for n in self.session.task.notes[-20:]))
+        return "\n".join(parts)
 
     # ---- state ----------------------------------------------------------
     @property
@@ -232,8 +260,19 @@ class NagaApp:
             await self.configure_model()
         assert self.agent is not None
         self.workspace.current_task = self.session.task.id
+        from .mentions import expand_mentions, extract_images
+        found, names = extract_images(text, self.workspace)
+        images = list(images or []) + self.pending_images + found
+        self.pending_images = []
+        if images and "vision" not in self.model_caps and self.model_caps:
+            self._notify("warning", f"{self.model_name} can't read images; {len(images)} image(s) not sent. "
+                                    "Switch to a vision model first (e.g. /model qwen3.6:27b).")
+            images = []
+        elif names:
+            self._notify("info", "attached image(s): " + ", ".join(names))
+        text = expand_mentions(text, self.workspace)
         try:
-            return await self.agent.run(text, images)
+            return await self.agent.run(text, images or None)
         finally:
             self.save()
 
@@ -245,6 +284,8 @@ class NagaApp:
                                   "model_seconds": round(u.duration_s or 0, 1)}
         if self.session.messages:
             self.sessions.save(self.session)
+            from . import change_store
+            change_store.save(self.project_root, self.session.id, self.workspace.changes)
 
     async def compact(self, focus: str | None = None) -> str:
         assert self.agent
@@ -259,6 +300,7 @@ class NagaApp:
         self.save()
         self.session = self.sessions.new()
         self.ctx.task = self.session.task
+        self.workspace.changes = []   # each session keeps its own change ledger (saved with it)
         self.artifacts.dir = data_home() / "artifacts" / self.session.id
         if self.agent:
             self.agent.history = self.session.messages
@@ -270,6 +312,10 @@ class NagaApp:
             raise KeyError("no saved sessions for this project")
         self.session = s
         self.ctx.task = s.task
+        from . import change_store
+        self.workspace.changes = change_store.load(self.project_root, s.id)   # /undo and /rewind after a restart
+        if self.workspace.changes:
+            self.workspace._next_change = max(c.id for c in self.workspace.changes) + 1
         self.set_mode(s.mode if s.mode in MODES else "agent")
         if self.agent:
             self.agent.history = s.messages
@@ -282,5 +328,7 @@ class NagaApp:
             self.save()
             await self.mcp.shutdown()
             await self.terminal.shutdown()
+            if self.ide is not None:
+                await self.ide.aclose()
             for p in self.providers.values():
                 await p.aclose()

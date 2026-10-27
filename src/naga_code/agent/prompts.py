@@ -77,6 +77,18 @@ def build_system_prompt(p: PromptParts) -> str:
     return "\n\n".join(sections)
 
 
+REQUIREMENTS_CHECK = (
+    "[naga runtime] Before you finish, check your work against the request, quoted here:\n<<<\n{request}\n>>>\n"
+    "1. List every explicit requirement, including those in docstrings or specs the request points to: accepted "
+    "input formats, every example, edge cases, error handling, files not to touch, things to run.\n"
+    "2. Verify them by EXECUTING code, not by reading: run one quick check (e.g. `python3 -c` with one assert per "
+    "requirement and per example) without creating files. Claims you did not execute do not count.\n"
+    "3. Fix anything that fails and run the check again.\n"
+    "When every requirement passes, give your final answer with the checklist and the check's real output.")
+
+REQUIREMENTS_RUN = ("[naga runtime] You answered without executing a check. Run the requirement checks now with a "
+                    "tool (one assert per requirement and example), fix what fails, then answer.")
+
 VALIDATION_NUDGE = ("[naga runtime] You modified files in this turn ({files}) but no tests, linters or other "
                     "validation commands were run. Either run the most relevant validation now, or, if validation "
                     "is not possible or not needed, say explicitly in your final answer that the changes are "

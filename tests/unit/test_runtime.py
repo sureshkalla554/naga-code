@@ -133,7 +133,11 @@ async def test_plan_mode_blocks_writes(make_app, project):
     await app.run("plan the fix")
     assert "a - b" in (project / "calc.py").read_text()
     assert app.session.task.plan.objective == "fix add"
-    assert "acceptance" in app.system_prompt().lower() and "test passes" in app.system_prompt()
+    note = app.runtime_context()   # changing state rides in the last message, not the cached system prompt
+    assert "acceptance" in note.lower() and "test passes" in note
+    msgs, _ = app.agent.build_messages()
+    assert msgs[-1].content.startswith("[naga runtime note") and "test passes" in msgs[-1].content
+    assert "test passes" not in app.system_prompt()
 
 
 async def test_provider_error_reported(make_app):
@@ -184,3 +188,46 @@ async def test_backend_parse_error_is_retried(make_app):
     app.agent.provider.stream_chat = flaky
     res = await app.run("x")
     assert res.stop_reason == "completed" and res.text == "recovered" and state["n"] == 2
+
+
+async def test_read_only_calls_in_one_turn_run_concurrently(make_app, project):
+    import asyncio
+    import time
+    from naga_code.security.commands import Risk
+    from naga_code.tools.registry import Tool, ToolResult
+
+    async def slow_read(ctx, a):
+        await asyncio.sleep(0.3)
+        return ToolResult(True, f"read {a['n']}")
+    script = [{"text": "", "tool_calls": [("slow_read", {"n": i}) for i in range(4)]}, "Done."]
+    app = await make_app(script)
+    app.registry.register(Tool("slow_read", "test", {"type": "object", "properties": {"n": {"type": "integer"}}},
+                               slow_read, Risk.READ))
+    t0 = time.perf_counter()
+    await app.run("read four things")
+    assert time.perf_counter() - t0 < 0.9            # 4 x 0.3 s sequentially would be 1.2 s
+    outs = [m.content for m in app.agent.history if m.role == "tool"]
+    assert outs == [f"read {i}" for i in range(4)]   # results stay in call order
+
+
+async def test_requirements_check_before_finishing_an_editing_turn(make_app, project):
+    script = [{"text": "", "tool_calls": [("read_file", {"path": "calc.py"})]},
+              {"text": "", "tool_calls": [("edit_file", {"path": "calc.py", "old_string": "a - b", "new_string": "a + b"})]},
+              {"text": "", "tool_calls": [("run_tests", {})]},
+              "Fixed add.",
+              "Checklist: add returns a+b. Looks right.",                       # answers without running: nudged
+              {"text": "", "tool_calls": [("run_tests", {})]},
+              "Checklist: add returns a+b (edit_file diff), tests pass (run_tests). Done."]
+    app = await make_app(script, overrides={"agent": {"requirements_check": True}})
+    result = await app.run("Fix add in calc.py so test_calc passes")
+    checks = [m for m in app.agent.history if m.role == "user" and "check your work against the request" in m.content]
+    assert len(checks) == 1 and "Fix add in calc.py" in checks[0].content
+    assert any("without executing a check" in m.content for m in app.agent.history if m.role == "user")
+    assert result.text.startswith("Checklist") and result.stop_reason == "completed"
+
+
+async def test_no_requirements_check_without_edits(make_app):
+    app = await make_app(["Just an answer."], overrides={"agent": {"requirements_check": True}})
+    result = await app.run("what does calc.py do?")
+    assert result.text == "Just an answer."
+    assert not any("check your work against the request" in m.content for m in app.agent.history)

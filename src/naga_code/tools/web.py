@@ -61,6 +61,53 @@ async def package_version(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     return ToolResult(True, f"{eco} {name}: latest version {version}", summary=f"{name} {version}")
 
 
+def _search_backend(ctx: ToolContext) -> tuple[str, str]:
+    """(name, base URL): a self-hosted SearXNG if configured, else DuckDuckGo's HTML endpoint."""
+    url = str(ctx.config.get("web.searxng_url", "") or "").rstrip("/")
+    return ("searxng", url) if url else ("duckduckgo", "https://html.duckduckgo.com/html/")
+
+
+def _ddg_results(page: str, limit: int) -> list[tuple[str, str, str]]:
+    from urllib.parse import parse_qs, unquote
+    out = []
+    for block in re.findall(r'<div class="result results_links.*?(?=<div class="result results_links|\Z)', page, re.S):
+        m = re.search(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', block, re.S)
+        if not m:
+            continue
+        href = html.unescape(m.group(1))
+        if "uddg=" in href:
+            href = unquote(parse_qs(urlparse(href).query).get("uddg", [href])[0])
+        snip = re.search(r'class="result__snippet"[^>]*>(.*?)</a>', block, re.S)
+        out.append((html_to_text(m.group(2)), href, html_to_text(snip.group(1)) if snip else ""))
+        if len(out) >= limit:
+            break
+    return out
+
+
+async def web_search(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
+    name, base = _search_backend(ctx)
+    limit = int(a.get("max_results", 8))
+    async with httpx.AsyncClient(timeout=float(ctx.config.get("web.timeout", 20)), follow_redirects=True,
+                                 headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) naga-code/0.1"}) as c:
+        if name == "searxng":
+            r = await c.get(f"{base}/search", params={"q": a["query"], "format": "json"})
+            if r.status_code == 403:
+                return ToolResult.error("SearXNG refused JSON output: enable `json` under search.formats in its "
+                                        "settings.yml")
+            r.raise_for_status()
+            rows = [(x.get("title", ""), x.get("url", ""), x.get("content", "")) for x in r.json().get("results", [])]
+        else:
+            r = await c.post(base, data={"q": a["query"]})
+            r.raise_for_status()
+            rows = _ddg_results(r.text, limit)
+    rows = rows[:limit]
+    if not rows:
+        return ToolResult(True, f"(no results for {a['query']!r})", summary="0 results")
+    body = "\n\n".join(f"{i}. {t}\n   {u}\n   {s[:300]}" for i, (t, u, s) in enumerate(rows, 1))
+    return ToolResult(True, f"[untrusted search results from {name}; open pages with web_fetch to verify]\n{body}",
+                      summary=f"{len(rows)} results via {name}")
+
+
 def _assess(kind: str):
     def assess(ctx: ToolContext, a: dict[str, Any]) -> ApprovalRequest:
         if kind == "fetch":
@@ -70,6 +117,11 @@ def _assess(kind: str):
             return ApprovalRequest("web_fetch", f"GET {a['url']}", Level.EXECUTE, network=True,
                                    impact="sends the URL to an external server; response is untrusted",
                                    grant_key=f"domain:{u.netloc}")
+        if kind == "search":
+            name, base = _search_backend(ctx)
+            return ApprovalRequest("web_search", f"search {name}: {a['query']}", Level.EXECUTE, network=True,
+                                   impact=f"sends the query text to {urlparse(base).netloc or base}; results are untrusted",
+                                   grant_key=f"search:{name}")
         return ApprovalRequest("package_version", f"look up {a['ecosystem']} package {a['name']}", Level.EXECUTE,
                                network=True, impact="sends the package name to the public registry",
                                grant_key=f"registry:{a['ecosystem']}")
@@ -82,6 +134,12 @@ def register(reg: ToolRegistry) -> None:
                       {"type": "object", "properties": {"url": S, "pattern": S}, "required": ["url"],
                        "additionalProperties": False}, web_fetch, Level.EXECUTE, timeout=60, category="web",
                       network=True, assess=_assess("fetch")))
+    reg.register(Tool("web_search", "Search the web (self-hosted SearXNG if configured, else DuckDuckGo). Use for "
+                                    "current docs, error messages, release notes. Never put code or secrets in queries.",
+                      {"type": "object", "properties": {"query": S, "max_results": {"type": "integer", "minimum": 1,
+                                                                                    "maximum": 20}},
+                       "required": ["query"], "additionalProperties": False}, web_search, Level.EXECUTE, timeout=45,
+                      category="web", network=True, assess=_assess("search")))
     reg.register(Tool("package_version", "Look up the latest published version of a package (pypi, npm, crates).",
                       {"type": "object", "properties": {"name": S, "ecosystem": {"enum": ["pypi", "npm", "crates"]}},
                        "required": ["name", "ecosystem"], "additionalProperties": False}, package_version,

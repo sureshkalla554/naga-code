@@ -106,11 +106,50 @@ async def search_code(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
 
 
 async def find_symbol(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
-    name = re.escape(a["name"])
+    """Parser-based for supported languages (exact definitions incl. methods); regex heuristics for the rest."""
+    from .. import codeintel
+    want = a["name"].split(".")[-1]
+    limit = a.get("max_results", 50)
+    files = {h.split(":", 1)[0] for h in await grep(ctx, want, a.get("path", "."), SOURCE_GLOBS, fixed=True, word=True,
+                                                     limit=2000)}
+    exact, unsupported = [], []
+    for rel in sorted(files):
+        p = ctx.workspace.resolve(rel)
+        if not codeintel.supported(p):
+            unsupported.append(rel)
+            continue
+        try:
+            src = p.read_bytes()
+        except OSError:
+            continue
+        for s in codeintel.symbols(p, src):
+            if s.name == want and (a["name"] == want or s.qualified.endswith(a["name"])):
+                exact.append(f"{rel.removeprefix('./')}:{s.line}: {s.kind} {s.qualified} (lines {s.line}-{s.end_line})")
+    if exact and not unsupported:
+        return ToolResult(True, "\n".join(exact[:limit]), summary=f"{len(exact)} definitions")
+    name = re.escape(want)
     combined = "|".join(f"(?:{p.format(name=name)})" for p in DEFINITION_PATTERNS)
-    hits = await grep(ctx, combined, a.get("path", "."), SOURCE_GLOBS, limit=a.get("max_results", 50))
-    return ToolResult(True, "\n".join(hits) or f"(no definition of '{a['name']}' found)",
-                      summary=f"{len(hits)} definitions")
+    hits = await grep(ctx, combined, a.get("path", "."), SOURCE_GLOBS, limit=limit)
+    supported_files = {r for r in files if r not in unsupported}
+    hits = [h for h in hits if h.split(":", 1)[0] not in supported_files]   # parser results are exact there
+    merged = exact + hits
+    return ToolResult(True, "\n".join(merged[:limit]) or f"(no definition of '{a['name']}' found)",
+                      summary=f"{len(merged)} definitions")
+
+
+async def code_outline(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
+    from .. import codeintel
+    p = ctx.workspace.resolve(a["path"])
+    if not p.is_file():
+        return ToolResult.error(f"not a file: {a['path']}")
+    if not codeintel.supported(p):
+        return ToolResult.error(f"no parser for {p.suffix or 'this file type'}; use search_code or read_file")
+    syms = codeintel.symbols(p, p.read_bytes())
+    errs = codeintel.syntax_errors(p, p.read_bytes())
+    text = codeintel.outline_text(ctx.workspace.rel(p), syms)
+    if errs:
+        text += "\n\nsyntax errors:\n" + "\n".join(f"  line {ln}:{col} {w}" for ln, col, w in errs)
+    return ToolResult(True, text, summary=f"{len(syms)} definitions")
 
 
 async def find_references(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
@@ -155,7 +194,11 @@ def register(reg: ToolRegistry) -> None:
                            "fixed_strings": {"type": "boolean"}, "context_lines": {"type": "integer", "minimum": 0, "maximum": 10},
                            "max_results": {"type": "integer", "minimum": 1, "maximum": 1000}}, ["pattern"]),
                       search_code, category="search"))
-    reg.register(Tool("find_symbol", "Find where a function/class/type/constant is defined (multi-language heuristics).",
+    reg.register(Tool("code_outline", "List every function, class, method and type defined in a file, with line "
+                                      "ranges (parsed, not guessed). Read the outline before reading big files.",
+                      obj({"path": S}, ["path"]), code_outline, category="search"))
+    reg.register(Tool("find_symbol", "Find where a function/class/method/type is defined. Accepts Class.method. "
+                                     "Parsed for Python, JS/TS, Go, Rust, Java, C/C++, C#, Ruby, PHP, Bash.",
                       obj({"name": S, "path": S, "max_results": {"type": "integer", "minimum": 1}}, ["name"]),
                       find_symbol, category="search"))
     reg.register(Tool("find_references", "Find whole-word references / call sites of a symbol in source files.",

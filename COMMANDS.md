@@ -20,6 +20,8 @@ Contents: [Everyday](#everyday) · [Sessions & conversation](#sessions--conversa
 | `/rewind` | Roll code and/or conversation back to before an earlier message (pick it with the arrow keys). |  |
 | `/btw <question>` | Ask a quick side question about the session without adding it to the conversation. |  |
 | `/copy [N]` | Copy the last (or N-th latest) assistant response to the clipboard. |  |
+| `/image <path>` | Attach an image file to your next message (for vision models). In a message, @shot.png also works. |  |
+| `/paste-image` | Attach the image on your clipboard (e.g. a screenshot) to your next message. |  |
 
 ## Sessions & conversation
 
@@ -29,7 +31,7 @@ Contents: [Everyday](#everyday) · [Sessions & conversation](#sessions--conversa
 | `/sessions` | List saved sessions for this project. |  |
 | `/rename [name]` | Rename the current session (shown in /resume); without a name one is generated. |  |
 | `/branch [name]` | Branch the conversation here: continue in a copy, the original stays resumable. |  |
-| `/fork [prompt]` | Copy this conversation into a background job (with an optional new instruction); you keep working here. |  |
+| `/fork [--here] [prompt]` | Copy this conversation into a background job (with an optional new instruction); you keep working here. |  |
 | `/recap` | Summarize the session so far: goal, what was done, current state and open items. |  |
 | `/export [path]` | Export the conversation and task report as Markdown. |  |
 | `/compact [instructions]` | Summarize older conversation to free context; optional focus instructions for the summary. |  |
@@ -86,19 +88,24 @@ Contents: [Everyday](#everyday) · [Sessions & conversation](#sessions--conversa
 | `/commit [message]` | Prepare and create a git commit after approval. |  |
 | `/checkpoint [list \| LABEL]` | Save a recoverable patch of all agent changes (or list checkpoints). |  |
 | `/apply PATCHFILE` | Apply a reviewed unified-diff patch file (shows the diff and asks for approval). |  |
+| `/issue <number> [extra instructions]` | Work on a GitHub issue: read it (gh), optionally create a branch, then implement it. **agent** |  |
+| `/pr [title]` | Push this branch and open a GitHub pull request (drafts title/description; asks before publishing). |  |
 
 ## Background & parallel work
 
 | command | what it does | aliases |
 |---|---|---|
-| `/background [prompt]` | Continue this session as a background job and start fresh here. Background jobs cannot ask for approval, so actions that need it are denied. | `/bg` |
+| `/background [--here] [prompt]` | Continue this session as a background job and start fresh here. In a git project the job works in its own worktree (edits allowed there; you apply them later). --here: run in place. | `/bg` |
 | `/list-agents [id]` | List background jobs started with /background, /fork or /schedule, with recent output. |  |
+| `/job-apply <job>` | Copy a finished background job's changes into your project (shows them first; no commit). |  |
+| `/job-discard <job>` | Delete a background job's worktree and branch (its changes are thrown away). |  |
 | `/stop <job>` | Stop a background job. |  |
 | `/subtask <task>` | Hand a side task to a subagent; its result is added to this conversation. **agent** |  |
 | `/delegate AGENT TASK...` | Run a subagent directly on a bounded task. |  |
 | `/agents` | List subagents with their tools, permission ceiling and limits. |  |
 | `/loop [interval] <prompt>` | Run a prompt repeatedly at an interval (e.g. /loop 5m run the tests). Ctrl+C stops. **agent** | `/proactive` |
 | `/schedule [list \| add "<cron expr>" <prompt> \| rm <id>]` | Run a prompt on a schedule with your user crontab: list \| add "<cron>" <prompt> \| rm <id>. | `/routines` |
+| `/notify [setup [server-url] \| test \| off \| status]` | Phone notifications and approvals for background jobs (ntfy): setup [server] \| test \| off \| status. |  |
 
 ## Skills, plugins & integrations
 
@@ -115,6 +122,7 @@ Contents: [Everyday](#everyday) · [Sessions & conversation](#sessions--conversa
 | `/mcp [list \| connect N \| disconnect N \| reconnect N\|all \| enable N\|all \| disable N\|all \| trust N \| tools N \| resources N]` | Inspect/manage MCP servers. |  |
 | `/hooks [trust]` | Show configured lifecycle hooks; '/hooks trust' approves project hooks. |  |
 | `/memory [list \| add [--user] TEXT \| rm SCOPE ID \| edit SCOPE ID TEXT \| export [PATH] \| clear SCOPE]` | Inspect/manage persistent memory. |  |
+| `/ide [connect]` | Show or refresh the connection to your editor (VS Code with the Naga extension). |  |
 
 ## Settings & safety
 
@@ -173,7 +181,6 @@ which a local-only agent doesn't have.
 | `/design-login` | Design is a claude.ai feature. |
 | `/design-sync` | Design is a claude.ai feature. |
 | `/desktop` | There is no Naga desktop app; Naga runs in your terminal. |
-| `/ide` | No IDE extension exists; run naga in your editor's terminal. |
 | `/install-github-app` | GitHub apps need a hosted service; the gh CLI works through the agent with approval. |
 | `/install-slack-app` | Slack integration needs a hosted service. |
 | `/login` | Naga has no account: it runs on local models. |
