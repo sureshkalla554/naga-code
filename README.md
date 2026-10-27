@@ -308,3 +308,7 @@ scripts/benchmark.sh --runs 3    # end-to-end coding tasks, results re-checked i
 - Commands that need a cloud account (login, remote control, teleport, …) aren't available.
 - Image input isn't exposed in the terminal UI yet, and web search isn't included.
 - Local models vary. Check the turn summary, which reports what actually happened.
+
+## License
+
+[MIT](LICENSE) © 2026 sureshkalla554

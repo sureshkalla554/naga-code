@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Naga Code: a local-first terminal coding agent for local LLMs"
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "httpx>=0.28.1",
     "jsonschema>=4.26.0",
