@@ -262,7 +262,8 @@ class TerminalApp:
     def banner(self) -> None:
         s = self.app.status()
         ok, detail = s["provider"]
-        if self.compact:
+        width = self.console.width
+        if width < 46:   # too narrow even for the logo (41 columns + panel border)
             self.console.print(f"[bold #f28a1e]Naga Code[/] v{__version__} · {s['model']} · "
                                f"{'[green]●[/]' if ok else '[red]●[/]'} · {s['mode']}")
             return
@@ -278,10 +279,14 @@ class TerminalApp:
         t.add_row("sandbox", f"[dim]{s['sandbox']}[/]")
         if self.app.instruction_files:
             t.add_row("instructions", ", ".join(str(f.path.name) + f" ({f.scope})" for f in self.app.instruction_files))
-        head = Table.grid(padding=(0, 3))
-        head.add_column(vertical="middle")
-        head.add_column(vertical="middle")
-        head.add_row(tiger(), Group(Text.from_markup(f"[bold #f28a1e]Naga Code[/] [dim]v{__version__}[/]\n"), t))
+        info = Group(Text.from_markup(f"[bold #f28a1e]Naga Code[/] [dim]v{__version__}[/]\n"), t)
+        if width >= 90:   # logo beside the details
+            head = Table.grid(padding=(0, 3))
+            head.add_column(vertical="middle")
+            head.add_column(vertical="middle")
+            head.add_row(tiger(), info)
+        else:              # narrow terminal: logo above the details
+            head = Group(tiger(), Text(""), info)
         self.console.print(Panel(head, subtitle="/help · local-first", border_style="#f28a1e", expand=False))
 
     # ---- agent turns ------------------------------------------------------------

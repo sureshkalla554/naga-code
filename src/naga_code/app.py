@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -90,6 +91,7 @@ class NagaApp:
         self.instruction_files = instr.discover(self.project_root, self.cwd,
                                                 self.config.get("context.max_instruction_chars", 12000))
         self.repo_map = ""
+        self._repo_map_task: asyncio.Future[str] | None = None
         self.agent: Agent | None = None
         self.model_name = ""
         self.context_length = 8192
@@ -186,7 +188,8 @@ class NagaApp:
         return name
 
     async def start(self) -> None:
-        self.repo_map = build_repo_map(self.workspace, max_chars=6500)
+        # Built in a thread while the user types: in a big directory it must never hold up the prompt.
+        self._repo_map_task = asyncio.ensure_future(asyncio.to_thread(build_repo_map, self.workspace, max_chars=6500))
         self.session.task.starting_git_status = G.status(self.project_root).short()
         await self.configure_model()
         await self.hooks.run("session_start", {"project": str(self.project_root)})
@@ -255,7 +258,16 @@ class NagaApp:
                 "changes": len(self.workspace.changes)}
 
     # ---- turns ----------------------------------------------------------
+    async def ensure_repo_map(self) -> None:
+        if self._repo_map_task is not None:
+            task, self._repo_map_task = self._repo_map_task, None
+            try:
+                self.repo_map = await task
+            except Exception as e:  # noqa: BLE001 - the map is a hint; a turn must not fail over it
+                self._notify("warning", f"repository map unavailable: {e}")
+
     async def run(self, text: str, images: list[str] | None = None) -> TurnResult:
+        await self.ensure_repo_map()
         if self.agent is None:
             await self.configure_model()
         assert self.agent is not None

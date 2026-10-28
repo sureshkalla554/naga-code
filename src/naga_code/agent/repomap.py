@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -79,8 +80,8 @@ def build_repo_map(ws: Workspace, max_chars: int = 6000) -> str:
     st = G.status(root)
     out.append(f"Git: {st.short()}")
     files = ws.git_files() if st.is_repo else None
-    if files is None:
-        files = [ws.rel(p) for p in ws.walk(max_files=20000)]
+    if files is None:   # not a git repo (maybe a huge dir like ~): sample, bounded in count and time
+        files = [ws.rel(p) for p in ws.walk(max_files=5000, deadline=time.monotonic() + 1.5)]
     langs = Counter(LANG[Path(f).suffix] for f in files if Path(f).suffix in LANG)
     if langs:
         out.append("Languages (files): " + ", ".join(f"{k} {v}" for k, v in langs.most_common(8)))

@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -160,35 +161,50 @@ class Workspace:
         (self.extra_write_dirs if writable else self.extra_read_dirs).append(d)
         return d
 
+    def _rel_str(self, p: str) -> str | None:
+        """Path string relative to the root, or None when outside it (string ops: pathlib's relative_to
+        dominated walking large trees)."""
+        root = str(self.root)
+        if p == root:
+            return ""
+        prefix = root if root.endswith(os.sep) else root + os.sep
+        return p[len(prefix):] if p.startswith(prefix) else None
+
     def rel(self, p: Path) -> str:
-        try:
-            return str(p.relative_to(self.root)) or "."
-        except ValueError:
-            return str(p)
+        r = self._rel_str(str(p))
+        return str(p) if r is None else (r or ".")
 
     def is_excluded(self, p: Path) -> bool:
-        try:
-            rel = p.relative_to(self.root)
-        except ValueError:
-            return False
-        s = str(rel) + ("/" if p.is_dir() else "")
-        return self._exclude.match_file(s) or any(self._exclude.match_file(part + "/") for part in rel.parts[:-1]) \
+        rel = self._rel_str(str(p))
+        return False if rel is None else self._excluded_rel(rel, p.is_dir())
+
+    def _excluded_rel(self, rel: str, is_dir: bool) -> bool:
+        s = rel + ("/" if is_dir else "")
+        return self._exclude.match_file(s) or any(self._exclude.match_file(part + "/")
+                                                  for part in rel.split(os.sep)[:-1]) \
             or self._gitignore.match_file(s)
 
-    def walk(self, start: Path | None = None, include_ignored: bool = False, max_files: int = 50_000) -> Iterator[Path]:
+    def walk(self, start: Path | None = None, include_ignored: bool = False, max_files: int = 50_000,
+             deadline: float | None = None) -> Iterator[Path]:
+        """Files under ``start``; stops after ``max_files`` or once ``time.monotonic()`` passes ``deadline``."""
         start = start or self.root
         count = 0
         for dirpath, dirnames, filenames in os.walk(start, followlinks=False):
+            if deadline is not None and time.monotonic() > deadline:
+                return
             d = Path(dirpath)
-            if not include_ignored:
+            drel = self._rel_str(dirpath)
+            join = (lambda n: n) if not drel else (lambda n: drel + os.sep + n)
+            if include_ignored:
+                dirnames[:] = sorted(n for n in dirnames if n != ".git")
+            elif drel is None:
                 dirnames[:] = sorted(n for n in dirnames if not self.is_excluded(d / n))
             else:
-                dirnames[:] = sorted(n for n in dirnames if n != ".git")
+                dirnames[:] = sorted(n for n in dirnames if not self._excluded_rel(join(n), True))
             for name in sorted(filenames):
-                fp = d / name
-                if not include_ignored and self.is_excluded(fp):
+                if not include_ignored and drel is not None and self._excluded_rel(join(name), False):
                     continue
-                yield fp
+                yield d / name
                 count += 1
                 if count >= max_files:
                     return

@@ -72,6 +72,7 @@ async def test_find_symbol_and_outline_tools(make_app, project):
     assert "Shop.Inner.deep" in r.output
     r = await app.registry.execute(ToolCall("code_outline", {"path": "shop.py"}), app.ctx)
     assert "class Shop" in r.output and "function main" in r.output
+    await app.ensure_repo_map()
     assert "shop.py: Shop, main" in app.repo_map or "shop.py: Shop" in app.repo_map
 
 
